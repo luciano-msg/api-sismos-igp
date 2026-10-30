@@ -1,45 +1,41 @@
 import requests
-from bs4 import BeautifulSoup
 import boto3
 import uuid
+from datetime import datetime
 
 def lambda_handler(event, context):
-    url = "https://ultimosismo.igp.gob.pe/productos/reportes-sismicos"
+    anio = datetime.utcnow().year
+    url = f"https://ultimosismo.igp.gob.pe/api/ultimo-sismo/ajaxb/{anio}"
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://ultimosismo.igp.gob.pe/productos/reportes-sismicos"
     }
 
     response = requests.get(url, headers=headers, timeout=20)
     if response.status_code != 200:
         return {
             'statusCode': response.status_code,
-            'body': 'Error al acceder a la pagina del IGP'
+            'body': f'Error al acceder al API del IGP ({response.status_code})'
         }
 
-    soup = BeautifulSoup(response.content, 'html.parser')
-    table = soup.find('table')
-    if not table:
+    data = response.json()
+
+    if isinstance(data, dict):
+        for key in ['data', 'sismos', 'items', 'results']:
+            if key in data and isinstance(data[key], list):
+                data = data[key]
+                break
+
+    if not isinstance(data, list) or len(data) == 0:
         return {
             'statusCode': 404,
-            'body': 'No se encontro la tabla en la pagina del IGP'
+            'body': 'La respuesta del IGP no contiene lista de sismos'
         }
 
-    headers_tabla = [th.get_text(strip=True) for th in table.find_all('th')]
-
-    filas = []
-    for tr in table.find_all('tr')[1:]:
-        celdas = tr.find_all('td')
-        if not celdas:
-            continue
-        fila = {}
-        for i, celda in enumerate(celdas):
-            clave = headers_tabla[i] if i < len(headers_tabla) else f"col{i}"
-            fila[clave] = celda.get_text(strip=True)
-        filas.append(fila)
-        if len(filas) == 10:
-            break
+    sismos = data[:10]
 
     dynamodb = boto3.resource('dynamodb')
     tabla = dynamodb.Table('TablaSismosIGP')
@@ -49,15 +45,18 @@ def lambda_handler(event, context):
         for item in scan['Items']:
             batch.delete_item(Key={'id': item['id']})
 
-    for i, fila in enumerate(filas, start=1):
-        fila['#'] = i
-        fila['id'] = str(uuid.uuid4())
-        tabla.put_item(Item=fila)
+    guardados = []
+    for i, sismo in enumerate(sismos, start=1):
+        item = {k: str(v) if v is not None else '' for k, v in sismo.items()}
+        item['#'] = i
+        item['id'] = str(uuid.uuid4())
+        tabla.put_item(Item=item)
+        guardados.append(item)
 
     return {
         'statusCode': 200,
         'body': {
-            'cantidad': len(filas),
-            'sismos': filas
+            'cantidad': len(guardados),
+            'sismos': guardados
         }
     }
